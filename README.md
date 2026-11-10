@@ -104,7 +104,7 @@ cd android
 
 로컬 HTTP 예외는 `10.0.2.2`와 `localhost`에만 허용됩니다. debug 빌드에는 `app/src/debug/`의 완화된 정책이 적용되어 임의 호스트로 평문 요청이 가능하고, release 빌드는 엄격한 정책을 유지합니다. 운영에서는 HTTPS Tunnel URL을 사용하십시오.
 
-앱은 충북대학교 좌표로 처음 이동하고 건물 및 현재 날짜의 그림자를 불러옵니다. 06:00–20:00 슬라이더 입력은 400ms debounce 후 다시 계산되며, `현재 시각`은 서울 현지 시각으로 즉시 갱신합니다. 지도 스타일 값은 `MapStyle.kt`에 모았습니다.
+앱은 충북대학교 좌표로 처음 이동해 건물을 3D로 세우고, **오늘**의 체감온도 히트맵을 불러오고, 슬라이더 위에 어느 시각 관측을 썼는지 표시합니다. 서버에 실시간 기상(API허브 키)이 없으면 관측이 끝난 마지막 날(보통 어제)을 씁니다. 어느 쪽인지는 `/api/weather/period`로 서버에 묻습니다. 아직 관측 전인 시각을 고르면 히트맵을 숨기고 최근 관측 시각을 알려 줍니다. `그림자` 버튼을 누르면 히트맵 대신 같은 시각의 그림자를 보여 줍니다. 히트맵에 그늘 효과가 이미 들어 있어 둘을 겹치지 않습니다. 06:00–20:00 슬라이더 입력은 400ms debounce 후 다시 계산되며, `현재 시각`은 서울 현지 시각의 시·분으로 즉시 갱신합니다. 히트맵은 서버가 보낸 격자를 앱에서 격자 한 칸당 한 픽셀인 비트맵으로 바꿔 `ImageSource`로 바닥에 깝니다. 지도 스타일 값은 `MapStyle.kt`, 체감온도 색상표는 `UtciHeatmap.kt`에 모았습니다.
 
 ## API
 
@@ -128,6 +128,43 @@ cd android
 ```
 
 timezone 없는 값은 `Asia/Seoul`로 해석합니다. offset이 있는 값은 같은 순간의 서울 시각으로 변환합니다. 결과는 현지 ISO datetime, 태양 고도·방위각, 그림자 GeoJSON과 전체/높이 보유/누락 건물 수를 포함합니다. 태양 고도가 0° 이하면 `features`가 빈 컬렉션이며, 직접 meter 높이가 없는 건물은 그림자 계산에서 제외됩니다.
+
+## 체감온도 계산 (v0)
+
+### `GET /api/microclimate`
+
+캠퍼스를 10m 격자로 나눠 선택 시각의 **추정 체감온도(UTCI)** 를 계산합니다. 시간 형식은 `/api/shadows`와 같고 좌표는 받지 않습니다.
+
+```text
+/api/microclimate?datetime=2025-08-05T15:00:00+09:00
+```
+
+응답에는 사용한 기상값(`weather`), 직달·산란 일사(`irradiance`), 격자 정보(`grid`), 요약(`summary`)과 격자별 `utci`, `mrt`(평균복사온도), `sunlit`(양지 비율) 배열이 들어 있습니다. 배열은 북서쪽 모서리부터 행 우선 순서이며, 캠퍼스 밖 셀은 `null`입니다. 건물이 절반 넘게 덮은 셀은 주변 바깥 셀의 평균으로 채워 보냅니다. 건물 외곽선이 10m 격자와 맞지 않아 비워 두면 건물과 히트맵 사이로 배경 지도가 하얀 띠처럼 비치기 때문이며, 이 셀들은 3D 건물에 가려지고 `summary` 계산에서도 빠집니다. gzip 압축 시 약 16KB입니다.
+
+계산은 세 단계입니다.
+
+1. 기상청 청주 ASOS의 시간 일사량을 Erbs 모델로 직달과 산란으로 나눕니다. 일사량은 직전 1시간 누적값이라, 그 시간의 청명도를 유지한 채 요청 시각의 태양 고도에 맞춰 순간값으로 바꿉니다.
+2. 건물 그림자(양지 비율)와 천공률(SVF)로 셀마다 평균복사온도를 계산합니다. SVF는 건물 배치에서 36방위·200m 범위로 한 번만 계산해 둡니다.
+3. 기온·습도·바람과 함께 `pythermalcomfort`로 UTCI를 구합니다.
+
+v0의 한계:
+
+- 기온·습도·바람은 캠퍼스 전체에 같은 기상청 값을 씁니다. 지점별 차이는 복사(그늘) 효과만 반영됩니다.
+- 지형, 나무, 지면 재질은 아직 반영하지 않습니다. 지면 반사율은 0.15로 고정입니다.
+- 높이가 없는 건물은 그림자와 SVF 계산에서 빠집니다.
+- 기상 자료가 없는 시각은 404를 반환합니다. 스냅샷 시작(2025-06-01) 이전과, 최근 관측으로부터 3시간이 지난 시각이 여기에 해당합니다.
+
+### 실시간 기상
+
+`KMA_APIHUB_KEY`(기상청 API허브, 지상관측 ASOS 시간자료 활용신청 필요)가 있으면 서버가 시작할 때 스냅샷 이후 빠진 시간을 API허브에서 채우고, 이후 5분마다 새 관측을 받아 메모리에 더합니다. 키가 없으면 커밋된 스냅샷만으로 동작하며 테스트도 이 모드로 돕니다.
+
+- 정시 관측은 약 3분 뒤 API허브에 올라옵니다(2026-09-27 19:00 관측이 19:02:52에 조회됨). 값은 공공데이터포털 스냅샷과 같습니다.
+- 한 시간의 관측은 처음에 일부 값이 빠진 채 올라왔다가 몇 분 뒤 채워지기도 합니다(같은 19:00의 운량). 그래서 매번 최근 2시간을 다시 받아 덮어씁니다.
+- 이번 시간 관측은 그 시간이 끝나야 나오므로, 최근 관측 이후 3시간까지는 **최근 관측을 이어서** 씁니다. 응답의 `weather.observed_at`과 `weather.persisted`가 어느 관측을 썼는지 알려 줍니다.
+- 한 시간의 값이 결측이면 직전 3시간 안의 마지막 값을 씁니다.
+- API허브 호출은 `certifi` 인증서 묶음으로 검증합니다. python.org의 macOS용 Python은 인증서 설치 단계를 거치지 않으면 API허브 인증서 체인을 거부합니다.
+
+지면 온도는 `기온 + 0.012 × 지면 일사량`으로 근사합니다. 계수는 청주 ASOS에서 일사 300W/m² 이상인 3,117시간의 `(지면온도 − 기온) / 일사량`으로 맞췄습니다(중앙값 0.0113, 최소제곱 0.0129).
 
 ## 좌표계와 그림자 계산
 
@@ -161,6 +198,8 @@ PostGIS 원본 geometry는 교환과 지도 렌더링에 적합한 `EPSG:4326`�
 | `cbnu_campus_parcels.json` | 대장 조회용 필지(PNU) 24개 |
 | `cbnu_building_aliases.json` | 자동 매칭이 닿지 않는 건물의 수동 대응표 |
 | `cbnu_buildings_match_report.json` | 수집·필터·높이 출처 통계 |
+| `kma_asos_131_hourly.csv` | 기상청 청주 ASOS(131) 시간자료 11,592시간 (2025-06-01 ~ 2026-09-26) |
+| `kma_asos_131_hourly.meta.json` | 위 자료의 출처·기간·열 설명 |
 
 지오메트리와 이름은 OSM을 기준으로 하며 이름은 `name:ko → name → ref → OSM ID` 순서로 선택합니다. 온실(`building=greenhouse`) 30동과 200㎡ 미만 22동은 제외했습니다. 제외된 52동 중 높이를 가진 건물은 하나도 없어 그림자는 줄지 않았습니다.
 
@@ -183,9 +222,13 @@ OSM 데이터는 [Open Database License(ODbL)](https://www.openstreetmap.org/cop
 | `POSTGRES_PASSWORD` | 개발 기본값은 `change-me`; 배포 전 변경 |
 | `DATABASE_URL` | API의 내부 PostgreSQL DSN |
 | `BUILDING_DATA_PATH` | DB 미사용 및 DB 동기화에 사용할 GeoJSON 경로 |
+| `CAMPUS_BOUNDARY_PATH` | 체감온도 격자 범위로 쓰는 캠퍼스 경계 GeoJSON |
+| `WEATHER_DATA_PATH` | 체감온도 계산에 쓰는 ASOS 시간자료 CSV |
+| `KMA_APIHUB_KEY` | 기상청 API허브 인증키. 있으면 실시간 기상을 이어 받음; 커밋 금지 |
+| `WEATHER_REFRESH_SECONDS` | API허브 조회 간격(초), 기본 300 |
 | `VWORLD_API_KEY` | `scripts/fetch_campus_parcels.py` 전용 키; 저장소에 커밋 금지 |
 | `VWORLD_DOMAIN` | VWorld 키 등록 도메인, 로컬 수집 기본값 `http://localhost` |
-| `DATA_GO_KR_API_KEY` | `scripts/fetch_building_ledger.py`용 공공데이터포털 키(Decoding); 커밋 금지 |
+| `DATA_GO_KR_API_KEY` | `scripts/fetch_building_ledger.py`, `scripts/fetch_kma_asos.py`용 공공데이터포털 키(Decoding); 커밋 금지 |
 | `CLOUDFLARE_TUNNEL_TOKEN` | 선택적 Tunnel token; 저장소에 커밋 금지 |
 | `API_BASE_URL` | Android build용 API base URL |
 
@@ -204,6 +247,8 @@ docker compose --env-file .env -f infra/docker-compose.yml --profile tunnel up -
 테스트는 낮/밤 태양 고도, 태양 방위각 범위, 45°에서 20m 높이의 20m 그림자, 반대 방향 벡터, polygon translation/sweep, 건물 및 그림자 GeoJSON API, 야간 빈 응답을 검증합니다.
 
 스냅샷 테스트는 105개의 유효한 Polygon/MultiPolygon, 중복 없는 OSM ID, 허용된 높이 출처, 리포트 집계, 전 건물이 캠퍼스 경계 안에 있는지를 검사합니다. **층수가 미터로 환산되지 않았는지도 검증합니다** — 층수만 있는 건물은 `height_m`이 반드시 `null`이어야 합니다.
+
+체감온도 테스트는 일사 분리가 전일사를 보존하는지, 양지와 그늘의 평균복사온도 차이가 문헌 범위(10~35°C)에 드는지, 이슬점으로 계산한 습도가 ASOS 관측과 맞는지, 기상값의 시간 보간과 야간 일사 0, 격자 응답 형식과 스냅샷 기간 밖 404를 검증합니다.
 
 ## 이후 계획
 
