@@ -1,4 +1,11 @@
-# Claude
-CLAUDE.md
-.claude/
-docs/superpowers/
+.env
+.idea/
+.gradle/
+local.properties
+**/build/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.DS_Store
+
